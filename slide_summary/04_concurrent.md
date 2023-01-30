@@ -139,3 +139,86 @@ pthread_cond_signal(&c); /* 誰か一人起こす */
     - returnする際にはまたmをLockしていることが保証
 ![](./assets/condvar.png)
 
+#### 例: 飽和付きカウンタ (os07)
+```c
+/* 注: このプログラムはOMP_NUM_THREADSを使わずにコマンドラインで受け取った引数でスレッド数を決めている(#pragma omp parallel num_threads(...)) */
+
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <omp.h>
+
+/* 飽和カウンタ */
+typedef struct {
+  long x;
+  long capacity;
+  pthread_mutex_t m[1];
+  pthread_cond_t c[1];
+  pthread_cond_t d[1];
+} scounter_t;
+
+/* 初期化(値を0にする) */
+void scounter_init(scounter_t * s, long capacity) {
+  s->x = 0;
+  s->capacity = capacity;
+  if (pthread_mutex_init(s->m, 0)) {
+    die("pthread_mutex_init");
+  }
+  if (pthread_cond_init(s->c, 0)) {
+    die("pthread_cond_init");
+  }
+  if (pthread_cond_init(s->d, 0)) {
+    die("pthread_cond_init");
+  }
+}
+
+/* +1 ただしcapacityに達していたら待つ */
+long scounter_inc(scounter_t * s) {
+  pthread_mutex_lock(s->m);
+  long x = s->x;
+  // capacityに達していたらwait
+  while (x >= s->capacity) {
+    assert(x == s->capacity);
+    pthread_cond_wait(s->c, s->m);
+    x = s->x;
+  }
+  // 飽和が解消されたので
+  s->x = x + 1; // increment
+  // この操作によってEmptyが解消されたら、下限condに寝てるThreadを起こす
+  if (x <= 0) {
+    assert(x == 0);
+    pthread_cond_broadcast(s->d);
+  }
+  pthread_mutex_unlock(s->m);
+  assert(x < s->capacity);
+  return x;
+}
+
+/* -1 */
+long scounter_dec(scounter_t * s) {
+  pthread_mutex_lock(s->m);
+  long x = s->x;
+  // emptyだったらwait
+  while (x <= 0) {
+    assert(x == 0);
+    pthread_cond_wait(s->d, s->m);
+    x = s->x;
+  }
+  // emptyが解消されたので
+  s->x = x - 1; // decrement
+  // この操作によって飽和が解消されたら、上限condで寝てるThreadを起こす
+  if (x >= s->capacity) {
+    assert(x == s->capacity);
+    pthread_cond_broadcast(s->c);
+  }
+  pthread_mutex_unlock(s->m);
+  return x;
+}
+
+/* 現在の値を返す */
+long scounter_get(scounter_t * s) {
+  return s->x;
+}
+```
+
