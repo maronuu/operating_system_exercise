@@ -222,3 +222,143 @@ long scounter_get(scounter_t * s) {
 }
 ```
 
+#### 条件変数使い方テンプレ
+ある条件Cが成り立つまで待って、Aをする、という場合
+```c
+pthread_mutex_lock(&m);
+while (1) {
+    C = ...; /* 条件評価 */
+    if (C) break;
+    pthread_cond_wait(&c, &m);
+}
+/* C が成り立っているのでここで何かをする */
+A
+/* 寝ている誰かを起こせそうなら起こす */
+...
+pthread_mutex_unlock(&m);
+```
+
+#### pthread_cond_waitがmutexも引数にとる理由
+- 条件判定時、そのThreadはmutexをlockしているはず。
+- 自分が処理をブロックしてwaitする際は、他のThreadにMutexを開けわたさないといけない。
+- mのunlockと自分の休眠を不可分に行う必要がある(Lost wake up問題への対処)
+
+## 不可分更新命令
+1変数に対するRead/Writeを不可分に行ういくつかの命令がある
+- adhocな命令
+    - test&set p (0だったら1にする)
+    ```c
+    if (*p == 0) {
+        *p = 1; return 1;
+    } else {
+        return 0;
+    }
+    ```
+    - fetch&add p, x
+    ```c
+    *p = *p + x;
+    ```
+    - swap p, r
+    ```c
+    x = *p;
+    *p = r;
+    r = x;
+    ```
+- 汎用命令
+    - compare&swap: 自分が読んだ値が書きかわっていないことを確かめながら不可分に書き込む
+    ```c
+    x = *p;
+    if (x == r) {
+        *p = s;
+        s = x;
+    }
+    ```
+    - `bool __sync_bool_compare_and_swap(type *p, type r, type s)`
+        - swapが起きたかどうかを返す
+    - `type __sync_val_compare_and_swap(type *p, type r, type s)`
+        - `*p`に入っていた値を返す
+
+### CASテンプレ
+`*p = f(*p)`という更新を不可分に
+```c
+while (1) {
+    x = *p;
+    y = f(x);
+    if (__sync_bool_compare_and_swap(p, x, y)) break;
+}
+```
+
+## 同期の実装
+- ナイーブな発想
+```c
+// NG例
+int lock(mutex_t *m) {
+    while (1) {
+        if (m->locked == 0) { // 評価(競合)
+            m->locked = 1; // 更新(競合)
+            break;
+        } else {
+            BLOCK
+        }
+    }
+}
+```
+
+- 不可分更新命令を使う & `futex`を使う
+```c
+// OK
+int lock(mutex_t * m) {
+    while (!test_and_set(&m->locked)) {
+        /* m->locked == 1 だったらブロック */
+        futex(&m->locked, FUTEX WAIT, 1, 0, 0, 0);
+    }
+}
+int unlock(mutex_t * m) {
+    m->locked = 0;
+    futex(&m->locked, FUTEX_WAKE, 1, 0, 0, 0);
+}
+```
+
+### `futex`
+`if(u==v) then block`を不可分に実行
+```c
+futex(&u, FUTEX_WAIT, v, 0, 0, 0);
+```
+参照: [man futex](https://linuxjm.osdn.jp/html/LDP_man-pages/man2/futex.2.html)
+
+### 休眠待機　vs 繁忙待機
+- 休眠待機 (blocking wait)
+    - `futex`, `cond_wait`などで待つ
+    - OSに「CPUを割り当てなくて良い」とわかるように待つ
+- 繁忙待機
+    - `while(!condition) { 何もしない }`
+    - OSに「CPUを割り当てなくて良い」ことがわからないように待つ(実行可能であり続ける)
+例はスライド04 p60-65あたり参照
+
+![](./assets/busy_wait.png)
+
+- 基本は使わないが、全てのスレッドが同時に実行されている想定のときは高速化できるかも。多数のスレッドが中断・復帰するときには有効。
+
+### スピンロック
+mutexの繁忙待機バージョン
+`pthread_spinlock_*`
+
+### futex自体の実装(advanced)
+スライド参照。。
+
+### デッドロック
+同期のための待機状態が循環し、どのスレッド・プロセスも永遠にブロックしたままになる状態
+Example
+- 二つ以上の排他制御
+![](./assets/deadlock1.png)
+- 送受信バッファ
+![](./assets/deadlock2.png)
+
+回避方法
+- 問題の根源は「誰かを待たせながら誰かを待つ」こと。これがダメ。
+- mutexを一つだけにする (giant lock)
+- 1つのスレッドは2つのMutexを同時にLockしない。
+- 全てのmutexに順序をつけ、全てのスレッドはその全順序の順でしかLockをしない
+- 不可分更新をするのに排他制御を使わない
+    - 不可分更新
+    - トランザクショナルメモリ
