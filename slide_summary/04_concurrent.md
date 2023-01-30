@@ -50,7 +50,7 @@ int main() {
     - 複数スレッド間で、Read/Writeの順序保証をする必要がある処理なのに、その保証ができない場合にダメになる。
 
 ## 同期 (Synchronization)
-### 排他制御 (mutex)
+### 排他制御 `mutex`
 1人しか入れない個室トイレ
 - `lock`: トイレが空いてれば入って鍵をかける。空いてなければ空くまで待つ
 - `unlock`: 鍵を空けてトイレを空ける。
@@ -68,4 +68,74 @@ pthread_mutex_lock(&m); /* lock */
 pthread_mutex_try_lock(&m);
 pthread_mutex_unlock(&m); /* unlock */
 ```
+
+![](./assets/concurrent_mutex_api.png)
+
+#### 例: スレッドセーフなIncrement Counter
+```c
+typedef struct {
+  long n;
+  pthread_mutex_t mutex;
+} counter_t;
+
+void counter_init(counter_t* c) {
+  c->n = 0;
+  pthread_mutex_init(&c->mutex, NULL);
+  return;
+}
+
+long counter_inc(counter_t* c) {
+  long ret;
+  pthread_mutex_lock(&c->mutex);
+  ret = c->n;
+  (c->n)++;
+  pthread_mutex_unlock(&c->mutex);
+  return ret;
+}
+
+long counter_get(counter_t* c) {
+  long ret;
+  pthread_mutex_lock(&c->mutex);
+  ret = c->n;
+  pthread_mutex_unlock(&c->mutex);
+  return ret;
+}
+```
+
+### バリア同期 `barrier`
+```c
+#include <pthread.h>
+pthread_barrier_t b; /* バリアオブジェクト */
+pthread_barrier_init(&b, attr, count);
+/* count=参加するスレッド数 */
+pthread_barrier_destroy(&b);
+pthread_barrier_wait(&b);
+/* 同期点に到達; 他のスレッドを待つ */
+```
+
+![](./assets/barrier_api.png)
+
+
+### 条件変数 `cond`
+ある条件が整うまで待つ、待っているスレッドを叩き起こす汎用機構。布団。
+
+```c
+#include <pthread.h>
+pthread_cond_t c;
+pthread_mutex_t m;
+
+pthread_cond_init(&c, attr);
+pthread_cond_destroy(&c);
+pthread_cond_wait(&c, &m); /* 寝る */
+pthread_cond_broadcast(&c); /* 全員起こす */
+pthread_cond_signal(&c); /* 誰か一人起こす */
+```
+
+#### `pthread_cond_wait(&c, &m)`の動作
+- `pthread_cond_wait`を呼び出した時点でスレッドはmをLockしている。
+    - mをunlockする
+    - cの上で寝る (中断・ブロック)
+を**不可分に**行う。
+    - returnする際にはまたmをLockしていることが保証
+![](./assets/condvar.png)
 
